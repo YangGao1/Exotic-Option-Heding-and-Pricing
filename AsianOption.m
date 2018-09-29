@@ -1,0 +1,55 @@
+function [CallPrice,PutPrice,CallDelta,PutDelta] = AsianOption(S,Save,Strike,T,t,r,Sigma) 
+if t>10/250
+     a =0.005;
+else
+     a = 0.0006;
+end
+%% 能保证准确
+for i=1:100
+  G = (Strike*T-Save*(T-t))/S;
+  X(i)=G+a*(i-1);
+%%
+n=10000;
+steps=300;
+d=t/steps;
+B=zeros(steps,n);
+B(1,:)=1;%初始化第一行均为1
+for j=2:steps
+     for k=1:n
+      B(j,k)=B(j-1,k)*exp((r-0.5*(Sigma^2))*d+sqrt(d)*Sigma*randn(1,1));
+     end
+end
+m=0;
+for l=1:n
+    y(l)=mean(B(:,l));
+    if t*y(l)>X(i)
+    m=m+1;
+    end
+end
+Y(i)=m/n;
+if Y(i)<1e-9
+    break
+end
+end
+%%
+if length(X)==1  CallPrice = 0;
+else
+    f=@(t)interp1(X,Y,t,'pchip','extrap');%用插值法拟合积分函数
+    integral=quadl(f,G,X(i));
+    CallPrice=integral*exp(-r*t)*S/T;
+end
+%%
+Put = CallPrice-(((T-t)*Save/T-S/(r*T)-Strike)*exp(-r*t)+S/(r*T));
+magic=quad(@(m)Sigma.*m.*sqrt(3).*exp(r.*m).*csc(Sigma.*m.*sqrt(3)),0,t);
+if Put <=0   
+    PutPrice =abs( CallPrice + exp(-r*t)*Strike-exp(-r*t)*S/t*magic);
+else         PutPrice = Put;
+end
+CallDelta = CallPrice/S+G*Y(1)*exp(-r*t)/T;
+if PutPrice ~=0
+    PutDelta =  CallDelta - (1-exp(-r*t))/(r*T);
+else 
+    PutDelta = 0;
+end
+
+end

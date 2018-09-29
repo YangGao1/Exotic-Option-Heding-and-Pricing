@@ -1,0 +1,264 @@
+%% Real-time hedge
+% clear;
+w = windmatlab;
+%% Hedge parameter setting---OTC
+Code    = {'JD1801.DCE'};  % Code of underlying asset
+Side    = 'sellput'; % Side: sellcall,sellput,buycall,buyput
+Strike  = 4210;     % Strike price
+Type    = 5;        % Type of option   European:1  American:2  Asian:3  Binary:4   Asian:5  Shout Option :6   Asian Shout Option:7 Adjusted Asian Option 8                 
+Premium = 1.34;       % 期权定价时波动率的溢价幅度
+Yield   = 0;
+Settle = '2017-10-10';        % 签约日期
+HedgeVol = 0.32;     %% 对冲设置波动率
+ExerciseDates = '2017-11-10 '; % 行权日期
+Time = (datenum(ExerciseDates)-datenum(today))/365;
+%% parameter of binary option
+pCStrike    = 0.95;   % Call Strike变动幅度
+pPStrike    = 1.05;   % Put Strike变动幅度
+pCash       = 0.05;   % 支付额占现价的比率
+SettlePrice = 6888;   %二元期权签约时的标的价格
+%% 亚式期权(含调整)
+Volume=20; %% 
+ t1= 5/250; %该参数可变，以250作为年化单位
+%% 呼叫期权 % 亚式呼叫期权
+ShoutPrice = 0;
+%% (加速)预加载数据
+Price = w.wsq(Code,'rt_last');   % 期货最新价格
+Rate  = w.wsq('CGB1Y.WI','rt_last')/100; % SHIBOR利率
+Volatility=[];
+[~,GarchVol,SellVol,BuyVol] = EstVolatility(char(Code));
+[EstVol,GarchVol,SellVol,BuyVol] = EstVolatility(char(Code));
+PremiumVol = Premium*max(GarchVol,SellVol);
+DiscountVol = (2-Premium)*min(GarchVol,BuyVol);
+
+fprintf('历史均值估计的波动率为 %f\n',EstVol);
+fprintf('GARCH模型估计的波动率为 %f\n',GarchVol);
+
+if strcmp(Side,'sellcall') || strcmp(Side,'sellput')
+    fprintf('卖出期权所估计的波动率为 %f\n',SellVol);
+    fprintf('卖出期权时定价所使用波动率为 %f\n\n',PremiumVol);
+    Volatility = [Volatility;PremiumVol];
+elseif strcmp(Side,'buycall') || strcmp(Side,'buyput')
+    fprintf('买入期权所估计的波动率为 %f\n',BuyVol);
+    fprintf('买入期权时定价所使用波动率为 %f\n\n',DiscountVol);
+    Volatility = DiscountVol;
+    Volatility = [Volatility;DiscountVol];
+end
+
+%% 逻辑判断
+if Type == 1
+    [CallPrice,PutPrice] = blsprice(Price, Strike, Rate, Time, Volatility,Yield);
+    if strcmp(Side,'buycall') || strcmp(Side,'sellcall')
+        OurPrice = CallPrice;
+    elseif strcmp(Side,'buyput') || strcmp(Side,'sellput')
+        OurPrice = PutPrice;
+    end
+    fprintf('期货的价格：%f\n',Price);
+    fprintf('我们对该欧式期权的定价为：%f\n',OurPrice);
+    [CallDelta,PutDelta,Gamma,CallTheta,PutTheta,Vega,CallRho,PutRho] ...
+    = BS_GreekLetters(Price,Strike,Rate,Time,HedgeVol,Yield);
+%% 
+elseif Type == 2
+    [ AmeCallPrice,AmePutPrice,~,~,Prob] = CRRPrice(Price,Strike,Rate,Time,Volatility,Yield);
+    if strcmp(Side,'buycall') || strcmp(Side,'sellcall')
+        OurPrice = AmeCallPrice;
+    elseif strcmp(Side,'buyput') || strcmp(Side,'sellput')
+        OurPrice = AmePutPrice;
+    end
+    fprintf('我们对该美式期权的定价为：%f，Prob = %f\n',OurPrice,Prob);
+    [CallDelta,PutDelta,Gamma,CallTheta,PutTheta,Vega,CallRho,PutRho] ...
+    = BS_GreekLetters(Price,Strike,Rate,Time,HedgeVol,Yield);
+%% 
+elseif Type == 3
+    if strcmp(Side,'buycall') || strcmp(Side,'sellcall')
+        [AsianPrice,Var,UP] = Asian_improve(Price,Strike,Rate,Time,Volatility,1);
+    elseif strcmp(Side,'buyput') || strcmp(Side,'sellput')
+        [AsianPrice,Var,UP] = Asian_improve(Price,Strike,Rate,Time,Volatility,0);
+    end
+       [CallDelta,PutDelta,Gamma,CallTheta,PutTheta,Vega,CallRho,PutRho] ...
+   = AsianGreeksLevy(Price,Strike,HedgeVol,Rate,Settle,ExerciseDates);
+    fprintf('我们对该亚式期权的定价为：%f\n',AsianPrice);
+    fprintf('亚式期权价格的方差为 %f  0.95置信区间的期权价格上下界为[%f, %f]\n ',Var,UP);
+    fprintf('亚式期权的delta为 %f\n ',CallDelta);
+%% 
+elseif Type == 4
+    [ BinCall,pCall,BinPut,pPut ] = BinPrice(Price,pCStrike,pPStrike,pCash,Rate,Volatility,Time,Yield);
+    if strcmp(Side,'buycall') || strcmp(Side,'sellcall')
+        OurPrice = BinCall;
+        pS = pCall;
+    elseif strcmp(Side,'buyput') || strcmp(Side,'sellput')
+        OurPrice = BinPut;
+        pS = pPut;
+    end
+    fprintf('我们对该二元期权的定价为：%f\n',OurPrice);
+    fprintf('期权价格/标的价格 = %f\n',pS);
+    
+    [CallDelta,PutDelta,CallGamma,PutGamma,CallTheta,PutTheta,CallVega,PutVega,CallRho,PutRho] = ...
+     Bin_GreekLetters( Price,pCStrike,pPStrike,Rate,pCash,HedgeVol,SettlePrice,ExerciseDates,Yield);
+%%
+elseif Type == 5
+    %Calculate Gt，若t时刻后的在到期日之前的期货的年化了（除以了365）的均价高于Gt，对于long call，即ATM
+    
+    T=double(w.tdayscount(Settle,ExerciseDates))/250; 
+    Today=datestr(today,'yyyy-mm-dd');
+    t=double(w.tdayscount(Today,ExerciseDates))/250;
+    n = length(w.wsd(Code,'close',Settle,'-1td','tradingcalender'));
+    %%
+ 
+     Save =(sum(w.wsd(Code,'close',Settle,'-1td','tradingcalender'))+Price)/(n+1);
+
+    %%
+    [CallPrice,PutPrice,~,~] = AsianOption(Price,Save,Strike,T,t,Rate,Volatility);
+    [~,~,CallDelta,PutDelta] = AsianOption(Price,Save,Strike,T,t,Rate,HedgeVol);
+    if strcmp(Side,'buycall') || strcmp(Side,'sellcall')
+        OurPrice = CallPrice;Delta = CallDelta;
+    elseif strcmp(Side,'buyput') || strcmp(Side,'sellput')
+        OurPrice = PutPrice;Delta = PutDelta;
+    end
+    %%
+    hedgevolume=Delta*Volume;%用公式算得的对冲手数
+    fprintf('期货的价格、历史均价：%.2f,%.2f\n',Price,Save);
+    fprintf('我们对该亚式期权最终的定价为：%.4f\n',OurPrice);
+    fprintf('用公式算得此刻该亚式期权的delta值为：%.4f\n',Delta);
+    fprintf('用公式算得的对冲手数为：%f\n\n',hedgevolume);   
+    elseif Type == 8
+    %Calculate Gt，若t时刻后的在到期日之前的期货的年化了（除以了365）的均价高于Gt，对于long call，即ATM
+   
+    T=double(w.tdayscount(Settle,ExerciseDates))/250; 
+    Today=datestr(today,'yyyy-mm-dd');
+    t=double(w.tdayscount(Today,ExerciseDates))/250;
+   
+    %%
+    if t >= t1 
+        Save  = 0; 
+        
+    else 
+         
+         n = (t1-t)*250-1;
+         n=double(n);
+         m=length(w.wsd(Code,'close',Settle,'-1td','tradingcalender'));
+         m=double(m);
+        aaa=w.wsd(Code,'close',Settle,'-1td','tradingcalender');
+        bbb=aaa(m-n:m);
+        Save =(sum(bbb)+Price)/(n+2);
+    end 
+    %%
+    [CallPrice,PutPrice,~,~] = AsianOption4(Price,Save,Strike,T,t,t1,Rate,Volatility);
+    [~,~,CallDelta,PutDelta] = AsianOption4(Price,Save,Strike,T,t,t1,Rate,Volatility);
+    if strcmp(Side,'buycall') || strcmp(Side,'sellcall')
+        OurPrice = CallPrice;Delta = CallDelta;
+    elseif strcmp(Side,'buyput') || strcmp(Side,'sellput')
+        OurPrice = PutPrice;Delta = PutDelta;
+    end
+    %%
+    hedgevolume=Delta*Volume;%用公式算得的对冲手数
+    fprintf('期货的价格、历史均价：%.2f,%.2f\n',Price,Save);
+    fprintf('我们对该亚式期权最终的定价为：%.4f\n',OurPrice);
+    fprintf('用公式算得此刻该亚式期权的delta值为：%.4f\n',Delta);
+    fprintf('用公式算得的对冲手数为：%f\n\n',hedgevolume); 
+   
+    
+%% 呼叫期权
+elseif Type == 6
+      [CallPrice,PutPrice] = ShoutOptionCRR(Price,ShoutPrice,Strike,Volatility,Time,Rate);
+      [CallDelta,PutDelta] = shoutgreeksCRR(Price,ShoutPrice,Strike,HedgeVol,Time,Rate);
+    if strcmp(Side,'buycall') || strcmp(Side,'sellcall')
+        OurPrice = CallPrice;Delta = CallDelta;
+    elseif strcmp(Side,'buyput') || strcmp(Side,'sellput')
+        OurPrice = PutPrice;Delta = PutDelta;
+    end
+hedgevolume=Delta*Volume;%用公式算得的对冲手数
+fprintf('期货的价格：%.2f\n',Price);
+fprintf('呼叫期权的呼叫价格为：%.2f\n',ShoutPrice);
+fprintf('该呼叫期权定价为：%.4f\n',OurPrice);
+fprintf('该呼叫期权的Delta值为：%.4f\n',Delta);
+fprintf('用公式算得的对冲手数为：%f\n\n',hedgevolume);  
+
+%% 亚式呼叫期权   %% 可以合约开始日  也可以合约开始后即期价格
+elseif Type == 7
+    T=double(w.tdayscount(Settle,ExerciseDates))/250;
+    Today=datestr(today,'yyyy-mm-dd');
+    t = double(w.tdayscount(Today,ExerciseDates))/250;
+    n = length(w.wsd(Code,'close',Settle,'-1td','tradingcalender'));
+    %%
+    if (T-t==0)  Save = Price;
+    else Save =(sum(w.wsd(Code,'close',Settle,'-1td','tradingcalender'))+Price)/(n+1);
+    end
+    %%
+    [CallPrice,PutPrice]=AsianShoutMC(Price,Save,Strike,T,t,Rate,Volatility,ShoutPrice);
+    [CallDelta,PutDelta]=AsianShoutGreeksMC(Price,Save,HedgeVol,T,t,Rate,Volatility,ShoutPrice);
+    if strcmp(Side,'buycall') || strcmp(Side,'sellcall')
+        OurPrice = CallPrice;Delta = CallDelta;
+    elseif strcmp(Side,'buyput') || strcmp(Side,'sellput')
+        OurPrice = PutPrice;Delta = PutDelta;
+    end
+    hedgevolume=Delta*Volume;%用公式算得的对冲手数
+    fprintf('期货的价格、历史均价：%.1f,%.1f \n',Price,Save);
+    fprintf('呼叫期权的呼叫价格为：%.1f\n',ShoutPrice);
+    fprintf('该亚式呼叫期权定价为：%.4f\n',OurPrice);
+    fprintf('该亚式呼叫期权的Delta为：%.4f\n', Delta );
+    fprintf('用公式算得的对冲手数为：%f\n\n',hedgevolume);  
+   
+    else
+    msgbox('期权类型输入错误！');
+end
+
+%%
+%%
+if Type == 4 
+    if strcmp(Side,'sellput') 
+        fprintf('\nPutDelta: %f\n',-PutDelta);
+        fprintf('PutGamma: %f\n',-PutGamma);
+        fprintf('PutTheta: %f\n',-PutTheta);
+        fprintf('PutVega: %f\n',-PutVega);
+        fprintf('PutRho: %f\n',-PutRho);
+    elseif strcmp(Side,'buycall') 
+        fprintf('\nCallDelta: %f\n',CallDelta);
+        fprintf('CallGamma: %f\n',CallGamma);
+        fprintf('CallTheta: %f\n',CallTheta);
+        fprintf('CallVega: %f\n',CallVega);
+        fprintf('CallRho: %f\n',CallRho);
+    elseif strcmp(Side,'buyput')
+        fprintf('\nPutDelta: %f\n',PutDelta);
+        fprintf('PutGamma: %f\n',PutGamma);
+        fprintf('PutTheta: %f\n',PutTheta);
+        fprintf('PutVega: %f\n',PutVega);
+        fprintf('PutRho: %f\n',PutRho);
+    elseif strcmp(Side,'sellcall')
+        fprintf('\nCallDelta: %f\n',-CallDelta);
+        fprintf('CallGamma: %f\n',-CallGamma);
+        fprintf('CallTheta: %f\n',-CallTheta);
+        fprintf('CallVega: %f\n',-CallVega);
+        fprintf('CallRho: %f\n',-CallRho);
+    else
+        error('交易方向输入错误！');
+    end
+elseif Type < 4
+    if strcmp(Side,'sellput') 
+        fprintf('\nCallDelta: %f\n',abs(PutDelta));
+        fprintf('Gamma: %f\n',-abs(Gamma));
+        fprintf('CallTheta: %f\n',abs(PutTheta));
+        fprintf('Vega: %f\n',-abs(Vega));
+        fprintf('CallRho: %f\n',abs(PutRho)) ;
+    elseif strcmp(Side,'buycall') 
+        fprintf('\nCallDelta: %f\n',abs(CallDelta));
+        fprintf('Gamma: %f\n',abs(Gamma));
+        fprintf('CallTheta: %f\n',-abs(CallTheta));
+        fprintf('Vega: %f\n',abs(Vega));
+        fprintf('CallRho: %f\n',abs(CallRho));
+    elseif strcmp(Side,'buyput')
+        fprintf('\nPutDelta: %f\n',-abs(PutDelta));
+        fprintf('Gamma: %f\n',abs(Gamma));
+        fprintf('PutTheta: %f\n',-abs(PutTheta));
+        fprintf('Vega: %f\n',abs(Vega));
+        fprintf('PutRho: %f\n',-abs(PutRho));
+    elseif strcmp(Side,'sellcall')
+        fprintf('\nPutDelta: %f\n',-abs(CallDelta));
+        fprintf('Gamma: %f\n',-abs(Gamma));
+        fprintf('PutTheta: %f\n',abs(CallTheta));
+        fprintf('Vega: %f\n',-abs(Vega));
+        fprintf('PutRho: %f\n',-abs(CallRho));
+    else
+        fprintf('')
+    end
+end
